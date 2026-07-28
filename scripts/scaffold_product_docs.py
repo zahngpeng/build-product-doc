@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""按项目、角色、模块和身份创建中文产品文档目录。"""
+"""按项目、端口、模块和身份创建中文产品文档目录。"""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ def parse_args() -> argparse.Namespace:
         action="append",
         default=[],
         metavar="角色=端口一,端口二",
-        help="设置角色使用的端口。",
+        help="设置角色使用的端口，并据此生成端口产品视图。",
     )
     parser.add_argument(
         "--module-role",
@@ -134,6 +134,14 @@ def role_endpoints(role: str, endpoints: dict[str, list[str]]) -> str:
     return "、".join(values) if values else "[待确认]"
 
 
+def endpoint_roles(
+    endpoint: str,
+    roles: list[str],
+    endpoints: dict[str, list[str]],
+) -> list[str]:
+    return [role for role in roles if endpoint in endpoints.get(role, [])]
+
+
 def mermaid_label(value: str) -> str:
     return re.sub(r"[\r\n\"[\]{}]+", " ", value).strip() or "待确认"
 
@@ -160,8 +168,8 @@ def information_structure(
     ]
     rows = [
         f"| P | — | 1 | {project_name} | 产品 | 全部 | 全部 | — | 产品总PRD |",
-        "| RG | P | 2 | 角色与身份 | 分组 | 全部 | 全部 | — | 角色产品视图 |",
-        "| EG | P | 2 | 产品端口 | 分组 | 全部 | 全部 | — | 信息架构与导航结构 |",
+        "| RG | P | 2 | 角色与身份 | 分组 | 全部 | 全部 | — | 业务模块按身份文档 |",
+        "| EG | P | 2 | 产品端口 | 分组 | 全部 | 全部 | — | 端口产品视图、信息架构与导航结构 |",
         "| MG | P | 2 | 业务模块 | 分组 | 全部 | 全部 | — | 产品功能架构 |",
     ]
 
@@ -171,16 +179,18 @@ def information_structure(
         lines.append(f"    RG --> {node_id}")
         rows.append(
             f"| {node_id} | RG | 3 | {role} | 角色 | {role} | "
-            f"{role_endpoints(role, endpoints)} | — | 角色功能清单、核心业务旅程 |"
+            f"{role_endpoints(role, endpoints)} | — | 业务模块按身份文档 |"
         )
 
     for index, endpoint in enumerate(endpoint_values or ["[待确认端口]"], 1):
         node_id = f"E{index:02d}"
         lines.append(f'    {node_id}["端口：{mermaid_label(endpoint)}"]')
         lines.append(f"    EG --> {node_id}")
+        roles_for_endpoint = endpoint_roles(endpoint, roles, endpoints)
+        role_summary = "、".join(roles_for_endpoint) if roles_for_endpoint else "[待确认]"
         rows.append(
-            f"| {node_id} | EG | 3 | {endpoint} | 端口 | [待确认] | "
-            f"{endpoint} | — | 信息架构与导航结构 |"
+            f"| {node_id} | EG | 3 | {endpoint} | 端口 | {role_summary} | "
+            f"{endpoint} | — | 端口功能清单、端口核心业务旅程 |"
         )
 
     for index, module in enumerate(modules or ["[待确认模块]"], 1):
@@ -242,11 +252,15 @@ def project_context(
         endpoints,
     )
     navigation_sections = "\n\n".join(
-        f"### 2.{index} {role}（{role_endpoints(role, endpoints)}）\n\n[待确认]"
-        for index, role in enumerate(roles, 1)
+        (
+            f"### 2.{index} {endpoint}\n\n"
+            f"适用身份：{'、'.join(endpoint_roles(endpoint, roles, endpoints)) or '[待确认]'}\n\n"
+            "[待确认]"
+        )
+        for index, endpoint in enumerate(endpoint_values, 1)
     )
     if not navigation_sections:
-        navigation_sections = "### 2.1 [待确认角色]\n\n[待确认]"
+        navigation_sections = "### 2.1 [待确认端口]\n\n适用身份：[待确认]\n\n[待确认]"
 
     return {
         "PROJECT_NAME": project_name,
@@ -256,7 +270,7 @@ def project_context(
         "MODULE_TABLE_ROWS": module_rows,
         "ROLE_HEADER_CELLS": " | ".join(roles) if roles else "[待确认角色]",
         "ROLE_SEPARATOR_CELLS": "|".join("---" for _ in (roles or ["待确认角色"])),
-        "ROLE_NAVIGATION_SECTIONS": navigation_sections,
+        "ENDPOINT_NAVIGATION_SECTIONS": navigation_sections,
         "INFORMATION_STRUCTURE_DIAGRAM": information_diagram,
         "INFORMATION_STRUCTURE_ROWS": information_rows,
     }
@@ -336,23 +350,27 @@ def scaffold() -> int:
         writer.add(f"01_项目级产品文档/{filename}", template, context)
 
     role_indexes = {role: index for index, role in enumerate(roles, 1)}
-    for role, role_number in role_indexes.items():
-        role_safe = safe_segment(role, "角色")
-        role_dir = f"02_角色产品视图/R{role_number:02d}_{role_safe}"
-        role_context = dict(
+    endpoint_values = unique(
+        [endpoint for values in endpoints.values() for endpoint in values]
+    )
+    for endpoint_number, endpoint in enumerate(endpoint_values, 1):
+        endpoint_safe = safe_segment(endpoint, "端口")
+        endpoint_dir = f"02_端口产品视图/E{endpoint_number:02d}_{endpoint_safe}"
+        roles_for_endpoint = endpoint_roles(endpoint, roles, endpoints)
+        endpoint_context = dict(
             common,
-            ROLE_NAME=role,
-            ROLE_ENDPOINTS=role_endpoints(role, endpoints),
+            ENDPOINT_NAME=endpoint,
+            ENDPOINT_ROLES="、".join(roles_for_endpoint) if roles_for_endpoint else "[待确认]",
         )
         writer.add(
-            f"{role_dir}/01_{role_safe}功能清单.md",
-            "角色产品视图/角色功能清单模板.md",
-            dict(role_context, DOC_ID=f"DOC-R{role_number:02d}-001"),
+            f"{endpoint_dir}/01_{endpoint_safe}端口功能清单.md",
+            "端口产品视图/端口功能清单模板.md",
+            dict(endpoint_context, DOC_ID=f"DOC-E{endpoint_number:02d}-001"),
         )
         writer.add(
-            f"{role_dir}/02_{role_safe}核心业务旅程.md",
-            "角色产品视图/核心业务旅程模板.md",
-            dict(role_context, DOC_ID=f"DOC-R{role_number:02d}-002"),
+            f"{endpoint_dir}/02_{endpoint_safe}端口核心业务旅程.md",
+            "端口产品视图/端口核心业务旅程模板.md",
+            dict(endpoint_context, DOC_ID=f"DOC-E{endpoint_number:02d}-002"),
         )
 
     for module_number, module in enumerate(modules, 1):

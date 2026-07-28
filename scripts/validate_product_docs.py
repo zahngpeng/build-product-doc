@@ -153,13 +153,15 @@ def validate(docs_root: Path) -> tuple[list[str], list[str]]:
         if not (project_dir / filename).is_file():
             errors.append(f"缺少项目级文档：{project_dir / filename}")
 
-    roles_dir = docs_root / "02_角色产品视图"
-    if not roles_dir.is_dir():
-        warnings.append(f"缺少角色产品视图目录：{roles_dir}")
+    endpoints_dir = docs_root / "02_端口产品视图"
+    if not endpoints_dir.is_dir():
+        warnings.append(f"缺少端口产品视图目录：{endpoints_dir}")
     else:
-        for role_dir in sorted(path for path in roles_dir.iterdir() if path.is_dir()):
-            if not contains_all(role_dir, ["功能清单", "核心业务旅程"]):
-                errors.append(f"角色产品视图不完整：{role_dir}")
+        for endpoint_dir in sorted(
+            path for path in endpoints_dir.iterdir() if path.is_dir()
+        ):
+            if not contains_all(endpoint_dir, ["端口功能清单", "端口核心业务旅程"]):
+                errors.append(f"端口产品视图不完整：{endpoint_dir}")
 
     modules_dir = docs_root / "03_业务模块"
     if not modules_dir.is_dir():
