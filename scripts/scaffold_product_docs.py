@@ -381,9 +381,11 @@ def scaffold() -> int:
         module_files = [
             (f"01_{module_safe}模块主PRD.md", "业务模块主文档/模块主PRD模板.md"),
             (f"02_{module_safe}模块功能清单.md", "业务模块主文档/模块功能清单模板.md"),
-            (f"03_{module_safe}业务流程.md", "业务模块主文档/业务流程模板.md"),
-            (f"04_{module_safe}状态流转.md", "业务模块主文档/状态流转模板.md"),
-            (f"05_{module_safe}字段字典.md", "业务模块主文档/字段字典模板.md"),
+            (
+                f"03_{module_safe}业务流程与状态流转.md",
+                "业务模块主文档/业务流程与状态流转模板.md",
+            ),
+            (f"04_{module_safe}字段字典.md", "业务模块主文档/字段字典模板.md"),
         ]
         for index, (filename, template) in enumerate(module_files, 1):
             writer.add(

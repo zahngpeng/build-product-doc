@@ -51,16 +51,16 @@ REQUIRED_SECTIONS: dict[str, list[str]] = {
         "规则ID/核心规则",
         "失败与异常",
     ],
-    "module-business-flow": [
-        "## 4. 主流程",
-        "## 9. 时限、通知与补偿",
+    "module-business-flow-state-transition": [
+        "## 一、业务流程",
+        "### 4. 主流程",
+        "### 9. 时限、通知与补偿",
         "业务规则与权限校验",
-    ],
-    "module-state-transition": [
-        "## 2. 状态定义",
-        "## 3. 状态流转表",
-        "## 5. 各角色状态展示与操作",
-        "## 7. 超时、自动流转与并发控制",
+        "## 二、状态流转",
+        "### 2. 状态定义",
+        "### 3. 状态流转表",
+        "### 5. 各角色状态展示与操作",
+        "### 7. 超时、自动流转与并发控制",
     ],
     "module-field-dictionary": [
         "## 一、头部字段（单据级）",
@@ -171,7 +171,12 @@ def validate(docs_root: Path) -> tuple[list[str], list[str]]:
             common_dir = module_dir / "01_业务模块主文档"
             if not contains_all(
                 common_dir,
-                ["模块主PRD", "模块功能清单", "业务流程", "状态流转", "字段字典"],
+                [
+                    "模块主PRD",
+                    "模块功能清单",
+                    "业务流程与状态流转",
+                    "字段字典",
+                ],
             ):
                 errors.append(f"业务模块主文档不完整：{common_dir}")
 
