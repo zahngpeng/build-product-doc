@@ -25,6 +25,15 @@ PROJECT_FILES = [
     "05_信息架构与导航结构.md",
 ]
 
+SCOPES = (
+    "all",
+    "project",
+    "endpoint",
+    "module-common",
+    "identity",
+    "page",
+)
+
 REQUIRED_SECTIONS: dict[str, list[str]] = {
     "project-overall": [
         "## 2. 建设目标与成功标准",
@@ -127,6 +136,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--project-root", required=True, help="项目根目录。")
     parser.add_argument("--docs-dir", default="docs/product", help="文档目录。")
     parser.add_argument(
+        "--scope",
+        choices=SCOPES,
+        default="all",
+        help=(
+            "校验范围：all全量、project项目级、endpoint端口产品视图、"
+            "module-common业务模块公共主文档、identity按身份模块文档、page页面PRD。"
+        ),
+    )
+    parser.add_argument(
         "--strict",
         action="store_true",
         help="将所有警告视为校验失败。",
@@ -141,7 +159,42 @@ def contains_all(directory: Path, fragments: list[str]) -> bool:
     return all(any(fragment in name for name in names) for fragment in fragments)
 
 
-def validate(docs_root: Path) -> tuple[list[str], list[str]]:
+def scoped_markdown_files(docs_root: Path, scope: str) -> list[Path]:
+    if scope == "all":
+        return sorted(docs_root.rglob("*.md"))
+
+    files: set[Path] = set()
+    if scope == "project":
+        files.update((docs_root / "01_项目级产品文档").rglob("*.md"))
+    elif scope == "endpoint":
+        files.update((docs_root / "02_端口产品视图").rglob("*.md"))
+    else:
+        modules_dir = docs_root / "03_业务模块"
+        if modules_dir.is_dir():
+            for module_dir in modules_dir.iterdir():
+                if not module_dir.is_dir():
+                    continue
+                if scope == "module-common":
+                    files.update(
+                        (module_dir / "01_业务模块主文档").rglob("*.md")
+                    )
+                    continue
+                identities_dir = module_dir / "02_按身份"
+                if not identities_dir.is_dir():
+                    continue
+                for identity_dir in identities_dir.iterdir():
+                    if not identity_dir.is_dir():
+                        continue
+                    if scope == "identity":
+                        files.update(identity_dir.glob("*.md"))
+                    elif scope == "page":
+                        files.update(
+                            (identity_dir / "03_页面PRD").rglob("*.md")
+                        )
+    return sorted(files)
+
+
+def validate(docs_root: Path, scope: str) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
 
@@ -149,61 +202,104 @@ def validate(docs_root: Path) -> tuple[list[str], list[str]]:
         return [f"产品文档目录不存在：{docs_root}"], warnings
 
     project_dir = docs_root / "01_项目级产品文档"
-    for filename in PROJECT_FILES:
-        if not (project_dir / filename).is_file():
-            errors.append(f"缺少项目级文档：{project_dir / filename}")
+    if scope in {"all", "project"}:
+        for filename in PROJECT_FILES:
+            if not (project_dir / filename).is_file():
+                errors.append(f"缺少项目级文档：{project_dir / filename}")
 
     endpoints_dir = docs_root / "02_端口产品视图"
-    if not endpoints_dir.is_dir():
-        warnings.append(f"缺少端口产品视图目录：{endpoints_dir}")
-    else:
-        for endpoint_dir in sorted(
-            path for path in endpoints_dir.iterdir() if path.is_dir()
-        ):
-            if not contains_all(endpoint_dir, ["端口功能清单", "端口核心业务旅程"]):
-                errors.append(f"端口产品视图不完整：{endpoint_dir}")
+    if scope in {"all", "endpoint"}:
+        if not endpoints_dir.is_dir():
+            message = f"缺少端口产品视图目录：{endpoints_dir}"
+            if scope == "endpoint":
+                errors.append(message)
+            else:
+                warnings.append(message)
+        else:
+            endpoint_dirs = sorted(
+                path for path in endpoints_dir.iterdir() if path.is_dir()
+            )
+            if scope == "endpoint" and not endpoint_dirs:
+                errors.append(f"没有可校验的端口产品视图：{endpoints_dir}")
+            for endpoint_dir in endpoint_dirs:
+                if not contains_all(
+                    endpoint_dir,
+                    ["端口功能清单", "端口核心业务旅程"],
+                ):
+                    errors.append(f"端口产品视图不完整：{endpoint_dir}")
 
     modules_dir = docs_root / "03_业务模块"
-    if not modules_dir.is_dir():
-        warnings.append(f"缺少业务模块目录：{modules_dir}")
-    else:
-        for module_dir in sorted(path for path in modules_dir.iterdir() if path.is_dir()):
-            common_dir = module_dir / "01_业务模块主文档"
-            if not contains_all(
-                common_dir,
-                [
-                    "模块主PRD",
-                    "模块功能清单",
-                    "业务流程与状态流转",
-                    "字段字典",
-                ],
-            ):
-                errors.append(f"业务模块主文档不完整：{common_dir}")
+    module_scopes = {"all", "module-common", "identity", "page"}
+    if scope in module_scopes:
+        if not modules_dir.is_dir():
+            message = f"缺少业务模块目录：{modules_dir}"
+            if scope == "all":
+                warnings.append(message)
+            else:
+                errors.append(message)
+        else:
+            module_dirs = sorted(
+                path for path in modules_dir.iterdir() if path.is_dir()
+            )
+            if scope != "all" and not module_dirs:
+                errors.append(f"没有可校验的业务模块：{modules_dir}")
+            for module_dir in module_dirs:
+                if scope in {"all", "module-common"}:
+                    common_dir = module_dir / "01_业务模块主文档"
+                    if not contains_all(
+                        common_dir,
+                        [
+                            "模块主PRD",
+                            "模块功能清单",
+                            "业务流程与状态流转",
+                            "字段字典",
+                        ],
+                    ):
+                        errors.append(f"业务模块主文档不完整：{common_dir}")
 
-            identities_dir = module_dir / "02_按身份"
-            if not identities_dir.is_dir():
-                warnings.append(f"模块尚未按身份生成文档：{identities_dir}")
-                continue
+                if scope not in {"all", "identity", "page"}:
+                    continue
 
-            for identity_dir in sorted(
-                path for path in identities_dir.iterdir() if path.is_dir()
-            ):
-                if not contains_all(
-                    identity_dir,
-                    ["模块主PRD", "模块功能清单", "验收PRD"],
-                ):
-                    errors.append(f"按身份划分的模块文档不完整：{identity_dir}")
+                identities_dir = module_dir / "02_按身份"
+                if not identities_dir.is_dir():
+                    message = f"模块尚未按身份生成文档：{identities_dir}"
+                    if scope == "all":
+                        warnings.append(message)
+                    else:
+                        errors.append(message)
+                    continue
 
-                page_dir = identity_dir / "03_页面PRD"
-                page_prds = (
-                    [path for path in page_dir.rglob("*.md")]
-                    if page_dir.is_dir()
-                    else []
+                identity_dirs = sorted(
+                    path for path in identities_dir.iterdir() if path.is_dir()
                 )
-                if not page_prds:
-                    warnings.append(f"尚未生成具体页面PRD：{page_dir}")
+                if scope in {"identity", "page"} and not identity_dirs:
+                    errors.append(f"没有可校验的身份目录：{identities_dir}")
+                for identity_dir in identity_dirs:
+                    if scope in {"all", "identity"} and not contains_all(
+                        identity_dir,
+                        ["模块主PRD", "模块功能清单", "验收PRD"],
+                    ):
+                        errors.append(f"按身份划分的模块文档不完整：{identity_dir}")
 
-    markdown_files = sorted(docs_root.rglob("*.md"))
+                    if scope not in {"all", "page"}:
+                        continue
+
+                    page_dir = identity_dir / "03_页面PRD"
+                    page_prds = (
+                        [path for path in page_dir.rglob("*.md")]
+                        if page_dir.is_dir()
+                        else []
+                    )
+                    if not page_prds:
+                        message = f"尚未生成具体页面PRD：{page_dir}"
+                        if scope == "all":
+                            warnings.append(message)
+                        else:
+                            errors.append(message)
+
+    markdown_files = scoped_markdown_files(docs_root, scope)
+    if scope != "all" and not markdown_files:
+        errors.append(f"指定范围没有可校验的Markdown文档：{scope}")
     ids: dict[str, list[Path]] = defaultdict(list)
     pending_count = 0
 
@@ -250,9 +346,10 @@ def main() -> int:
         print("错误：--docs-dir必须位于项目根目录内", file=sys.stderr)
         return 2
 
-    errors, warnings = validate(docs_root)
+    errors, warnings = validate(docs_root, args.scope)
 
     print(f"校验目录：{docs_root}")
+    print(f"校验范围：{args.scope}")
     print(f"错误：{len(errors)}")
     for item in errors:
         print(f"  错误：{item}")
