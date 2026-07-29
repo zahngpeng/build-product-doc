@@ -143,7 +143,8 @@ def endpoint_roles(
 
 
 def mermaid_label(value: str) -> str:
-    return re.sub(r"[\r\n\"[\]{}]+", " ", value).strip() or "待确认"
+    label = re.sub(r"[\r\n\"[\]{}]+", " ", value).strip() or "待确认"
+    return label.replace("&", "＆").replace("<", "＜").replace(">", "＞")
 
 
 def information_structure(
@@ -200,8 +201,8 @@ def information_structure(
         lines.extend(
             [
                 f'    {module_id}["模块：{mermaid_label(module)}"]',
-                f'    {object_id}["核心业务对象：[待确认]"]',
-                f'    {page_id}["页面与交互：[待确认]"]',
+                f'    {object_id}["核心业务对象：待确认"]',
+                f'    {page_id}["页面与交互：待确认"]',
                 f"    MG --> {module_id}",
                 f"    {module_id} --> {object_id}",
                 f"    {module_id} --> {page_id}",
@@ -251,6 +252,7 @@ def project_context(
         modules,
         endpoints,
     )
+    information_block = f"```mermaid\n{information_diagram}\n```"
     navigation_sections = "\n\n".join(
         (
             f"### 2.{index} {endpoint}\n\n"
@@ -271,7 +273,7 @@ def project_context(
         "ROLE_HEADER_CELLS": " | ".join(roles) if roles else "[待确认角色]",
         "ROLE_SEPARATOR_CELLS": "|".join("---" for _ in (roles or ["待确认角色"])),
         "ENDPOINT_NAVIGATION_SECTIONS": navigation_sections,
-        "INFORMATION_STRUCTURE_DIAGRAM": information_diagram,
+        "INFORMATION_STRUCTURE_BLOCK": information_block,
         "INFORMATION_STRUCTURE_ROWS": information_rows,
     }
 
