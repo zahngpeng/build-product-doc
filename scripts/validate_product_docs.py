@@ -66,16 +66,34 @@ REQUIRED_SECTIONS: dict[str, list[str]] = {
         "规则ID/核心规则",
         "失败与异常",
     ],
-    "module-business-flow-state-transition": [
-        "## 一、业务流程",
-        "### 4. 主流程",
-        "### 9. 时限、通知与补偿",
-        "业务规则与权限校验",
-        "## 二、状态流转",
+    "module-business-flow-deduction": [
+        "## 二、流程清单",
+        "## 三、主流程",
+        "## 四、分支流程",
+        "## 五、辅助流程",
+        "## 六、异常流程",
+        "## 七、状态流转",
         "### 2. 状态定义",
         "### 3. 状态流转表",
-        "### 5. 各角色状态展示与操作",
         "### 7. 超时、自动流转与并发控制",
+        "## 八、覆盖与追踪",
+        "关联数据用例ID",
+        "前置状态与关键数据",
+    ],
+    "module-use-case-data-deduction": [
+        "## 二、数据用例清单",
+        "## 三、复用基础数据",
+        "## 四、完整锚点用例推演",
+        "#### 4.1.3 页面初始化",
+        "#### 4.1.4 头部字段输入",
+        "#### 4.1.5 明细行数据",
+        "明细总行数",
+        "#### 4.1.7 保存、提交或失败结果",
+        "#### 4.1.8 操作后数据快照",
+        "## 五、分支、辅助、异常与边界用例差异",
+        "锚点用例ID",
+        "## 六、字段与页面回填",
+        "## 七、追踪与覆盖",
     ],
     "module-field-dictionary": [
         "## 一、头部字段（单据级）",
@@ -84,6 +102,7 @@ REQUIRED_SECTIONS: dict[str, list[str]] = {
         "## 四、枚举与选项",
         "## 五、字段联动、计算与校验",
         "## 六、身份与端口差异",
+        "## 七、字段与数据用例关系",
         "字段ID | 字段名称 | 字段来源 | 取值说明 | 必填性 | 新增页 | 编辑页 | 列表展示 | 可筛选 | 详情展示 | 字段说明 | 备注",
     ],
     "role-module-master-prd": [
@@ -106,6 +125,7 @@ REQUIRED_SECTIONS: dict[str, list[str]] = {
         "## 9. 页面状态",
         "## 13. 验收标准",
         "| 路由/页面地址 |",
+        "关联数据用例ID",
     ],
     "detail-page-prd": [
         "## 4. 信息分组与字段",
@@ -116,6 +136,7 @@ REQUIRED_SECTIONS: dict[str, list[str]] = {
         "## 8. 页面状态",
         "## 12. 验收标准",
         "| 路由/页面地址 |",
+        "关联数据用例ID",
     ],
     "generic-page-prd": [
         "## 3. 字段与内容",
@@ -124,6 +145,7 @@ REQUIRED_SECTIONS: dict[str, list[str]] = {
         "## 10. 验收标准",
         "| 路由/页面地址 |",
         "| 取消与关闭规则 |",
+        "关联数据用例ID",
     ],
     "acceptance-prd": [
         "## 5. 功能与页面验收用例",
@@ -133,6 +155,7 @@ REQUIRED_SECTIONS: dict[str, list[str]] = {
         "## 12. 业务规则、边界与并发验收",
         "## 13. 通知与操作记录验收",
         "## 16. 需求覆盖检查",
+        "数据用例ID",
     ],
 }
 
@@ -257,11 +280,20 @@ def validate(docs_root: Path, scope: str) -> tuple[list[str], list[str]]:
                         [
                             "模块主PRD",
                             "模块功能清单",
-                            "业务流程与状态流转",
+                            "业务流程推演",
+                            "用例数据推演",
                             "字段字典",
                         ],
                     ):
                         errors.append(f"业务模块主文档不完整：{common_dir}")
+                    legacy_flow_docs = list(
+                        common_dir.glob("*业务流程与状态流转*.md")
+                    ) if common_dir.is_dir() else []
+                    if legacy_flow_docs:
+                        warnings.append(
+                            "存在旧版业务流程与状态流转文档，请完成迁移并避免并行规则来源："
+                            + "、".join(str(path) for path in legacy_flow_docs)
+                        )
 
                 if scope not in {"all", "identity", "page"}:
                     continue

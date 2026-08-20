@@ -378,16 +378,24 @@ def scaffold() -> int:
     for module_number, module in enumerate(modules, 1):
         module_safe = safe_segment(module, "模块")
         module_dir = f"03_业务模块/M{module_number:02d}_{module_safe}"
-        module_context = dict(common, MODULE_NAME=module)
+        module_context = dict(
+            common,
+            MODULE_ID=f"M{module_number:02d}",
+            MODULE_NAME=module,
+        )
 
         module_files = [
             (f"01_{module_safe}模块主PRD.md", "业务模块主文档/模块主PRD模板.md"),
             (f"02_{module_safe}模块功能清单.md", "业务模块主文档/模块功能清单模板.md"),
             (
-                f"03_{module_safe}业务流程与状态流转.md",
-                "业务模块主文档/业务流程与状态流转模板.md",
+                f"03_{module_safe}业务流程推演.md",
+                "业务模块主文档/业务流程推演模板.md",
             ),
-            (f"04_{module_safe}字段字典.md", "业务模块主文档/字段字典模板.md"),
+            (
+                f"04_{module_safe}用例数据推演.md",
+                "业务模块主文档/用例数据推演模板.md",
+            ),
+            (f"05_{module_safe}字段字典.md", "业务模块主文档/字段字典模板.md"),
         ]
         for index, (filename, template) in enumerate(module_files, 1):
             writer.add(
