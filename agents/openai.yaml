@@ -1,4 +1,4 @@
 interface:
   display_name: "产品文档架构师"
-  short_description: "生成项目级、端口级、模块级、页面级和验收类中文产品文档"
-  default_prompt: "使用 $build-product-docs，根据当前项目生成项目级、端口级、模块级、页面级和验收产品文档。"
+  short_description: "按已确认范围生成、更新或审核中文产品文档，关联业务规则、页面与验收"
+  default_prompt: "使用 $build-product-docs，按我指定的范围生成、更新或审核产品文档，并说明依据、影响与待确认项。"

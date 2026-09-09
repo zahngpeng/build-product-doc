@@ -9,10 +9,15 @@ import re
 import sys
 from pathlib import Path
 
+try:
+    from doc_support import PLACEHOLDER_RE, frontmatter, yaml
+except RuntimeError as exc:
+    print(f"错误：{exc}", file=sys.stderr)
+    raise SystemExit(2)
+
 
 SKILL_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE_ROOT = SKILL_ROOT / "assets" / "模板"
-PLACEHOLDER_RE = re.compile(r"\{\{([A-Z0-9_]+)\}\}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -20,6 +25,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--project-root", required=True, help="项目根目录。")
     parser.add_argument("--project-name", required=True, help="项目名称。")
     parser.add_argument("--docs-dir", default="docs/product", help="文档输出目录。")
+    parser.add_argument("--layout", choices=["shared", "by-identity"],
+                        help="新建默认 shared；已有结构自动沿用。by-identity 仅用于独立业务身份。")
+    parser.add_argument("--scope", choices=["project", "module"], default="project",
+                        help="module 只生成所列模块，不创建项目和端口级文档。")
     parser.add_argument("--role", action="append", default=[], help="角色名称，可重复传入。")
     parser.add_argument("--module", action="append", default=[], help="模块名称，可重复传入。")
     parser.add_argument(
@@ -39,7 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--include-core-pages",
         action="store_true",
-        help="为所有适用身份和端口创建列表页、详情页PRD。",
+        help="仅在已确认所选范围均有列表和详情页时使用；需要已知角色和端口。",
     )
     parser.add_argument("--dry-run", action="store_true", help="仅显示计划，不创建文件。")
     return parser.parse_args()
@@ -74,6 +83,8 @@ def parse_mapping(entries: list[str], label: str) -> dict[str, list[str]]:
         values = unique(raw_values.split(","))
         if not key or not values:
             raise ValueError(f"{label}存在空名称或空值：{entry!r}")
+        if key in result:
+            raise ValueError(f"{label}名称重复：{key}")
         result[key] = values
     return result
 
@@ -88,8 +99,18 @@ def ensure_inside(project_root: Path, output_root: Path) -> None:
 def render(template_relative: str, context: dict[str, str]) -> str:
     template_path = TEMPLATE_ROOT / template_relative
     content = template_path.read_text(encoding="utf-8")
-    for key, value in context.items():
-        content = content.replace("{{" + key + "}}", value)
+    # Parse first: substituting raw names into YAML quotes can corrupt metadata.
+    metadata, body, _ = frontmatter(content)
+    def fill(value):
+        if isinstance(value, str):
+            for key, replacement in context.items():
+                value = value.replace("{{" + key + "}}", replacement)
+        elif isinstance(value, list):
+            value = [fill(item) for item in value]
+        elif isinstance(value, dict):
+            value = {key: fill(item) for key, item in value.items()}
+        return value
+    content = "---\n" + yaml.safe_dump(fill(metadata), allow_unicode=True, sort_keys=False) + "---\n" + fill(body)
     unresolved = sorted(set(PLACEHOLDER_RE.findall(content)))
     if unresolved:
         raise ValueError(
@@ -105,18 +126,49 @@ class Writer:
         self.dry_run = dry_run
         self.created: list[Path] = []
         self.skipped: list[Path] = []
+        self.plan: dict[Path, str] = {}
 
     def add(self, relative: str, template: str, context: dict[str, str]) -> None:
-        destination = self.output_root / relative
-        if destination.exists():
-            self.skipped.append(destination)
-            return
+        destination = (self.output_root / relative).resolve()
+        ensure_inside(self.output_root, destination)
+        if destination in self.plan:
+            raise ValueError(f"创建计划存在重复路径：{destination}")
         content = render(template, context)
-        self.created.append(destination)
-        if self.dry_run:
-            return
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(content, encoding="utf-8")
+        self.plan[destination] = content
+
+    def commit(self) -> None:
+        """Preflight every ID/path before any writes; preserve existing contents."""
+        ids: dict[str, Path] = {}
+        for path in self.output_root.rglob("*.md"):
+            ensure_inside(self.output_root, path.resolve())
+            metadata, _, _ = frontmatter(path.read_text(encoding="utf-8-sig"))
+            identifier = metadata.get("doc_id")
+            if not isinstance(identifier, str) or not identifier:
+                raise ValueError(f"现有文件缺少 doc_id，无法安全补建：{path}")
+            if identifier in ids and ids[identifier] != path.resolve():
+                raise ValueError(f"现有文档ID冲突：{identifier}")
+            ids[identifier] = path.resolve()
+        for path, content in self.plan.items():
+            metadata, _, _ = frontmatter(content)
+            identifier = metadata["doc_id"]
+            if identifier in ids and ids[identifier] != path:
+                raise ValueError(f"文档ID与已有路径冲突：{identifier}；保留原模块/角色/端口顺序后重试，或手工补建。未写入文件。")
+            if path.exists():
+                if not path.is_file():
+                    raise ValueError(f"目标不是文件：{path}")
+                existing, _, _ = frontmatter(path.read_text(encoding="utf-8-sig"))
+                for key in ("doc_id", "document_type", "page_id"):
+                    if existing.get(key) != metadata.get(key):
+                        raise ValueError(f"同路径现有元数据 {key} 不匹配，停止补建：{path}")
+                self.skipped.append(path)
+            else:
+                self.created.append(path)
+            ids[identifier] = path
+        if not self.dry_run:
+            for path in self.created:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("x", encoding="utf-8") as stream:
+                    stream.write(self.plan[path])
 
     def report(self) -> None:
         action = "计划创建" if self.dry_run else "已创建"
@@ -143,8 +195,7 @@ def endpoint_roles(
 
 
 def mermaid_label(value: str) -> str:
-    label = re.sub(r"[\r\n\"[\]{}]+", " ", value).strip() or "待确认"
-    return label.replace("&", "＆").replace("<", "＜").replace(">", "＞")
+    return re.sub(r"[\r\n\"[\]{}]+", " ", value).strip() or "待确认"
 
 
 def information_structure(
@@ -169,7 +220,7 @@ def information_structure(
     ]
     rows = [
         f"| P | — | 1 | {project_name} | 产品 | 全部 | 全部 | — | 产品总PRD |",
-        "| RG | P | 2 | 角色与身份 | 分组 | 全部 | 全部 | — | 业务模块按身份文档 |",
+        "| RG | P | 2 | 角色与身份 | 分组 | 全部 | 全部 | — | 模块权限矩阵或身份文档 |",
         "| EG | P | 2 | 产品端口 | 分组 | 全部 | 全部 | — | 端口产品视图、信息架构与导航结构 |",
         "| MG | P | 2 | 业务模块 | 分组 | 全部 | 全部 | — | 产品功能架构 |",
     ]
@@ -180,7 +231,7 @@ def information_structure(
         lines.append(f"    RG --> {node_id}")
         rows.append(
             f"| {node_id} | RG | 3 | {role} | 角色 | {role} | "
-            f"{role_endpoints(role, endpoints)} | — | 业务模块按身份文档 |"
+            f"{role_endpoints(role, endpoints)} | — | 模块权限矩阵或身份文档 |"
         )
 
     for index, endpoint in enumerate(endpoint_values or ["[待确认端口]"], 1):
@@ -201,8 +252,8 @@ def information_structure(
         lines.extend(
             [
                 f'    {module_id}["模块：{mermaid_label(module)}"]',
-                f'    {object_id}["核心业务对象：待确认"]',
-                f'    {page_id}["页面与交互：待确认"]',
+                f'    {object_id}["核心业务对象：[待确认]"]',
+                f'    {page_id}["页面与交互：[待确认]"]',
                 f"    MG --> {module_id}",
                 f"    {module_id} --> {object_id}",
                 f"    {module_id} --> {page_id}",
@@ -252,7 +303,6 @@ def project_context(
         modules,
         endpoints,
     )
-    information_block = f"```mermaid\n{information_diagram}\n```"
     navigation_sections = "\n\n".join(
         (
             f"### 2.{index} {endpoint}\n\n"
@@ -270,10 +320,14 @@ def project_context(
         "ROLE_TABLE_ROWS": role_rows,
         "ENDPOINT_SUMMARY": "、".join(endpoint_values) if endpoint_values else "[待确认]",
         "MODULE_TABLE_ROWS": module_rows,
+        "MODULE_BOUNDARY_ROWS": "\n".join(
+            f"| {module}（M{index:02d}） | [待确认] | [待确认] | [待确认] | [待确认] |"
+            for index, module in enumerate(modules, 1)
+        ) or "| [待确认] | [待确认] | [待确认] | [待确认] | [待确认] |",
         "ROLE_HEADER_CELLS": " | ".join(roles) if roles else "[待确认角色]",
         "ROLE_SEPARATOR_CELLS": "|".join("---" for _ in (roles or ["待确认角色"])),
         "ENDPOINT_NAVIGATION_SECTIONS": navigation_sections,
-        "INFORMATION_STRUCTURE_BLOCK": information_block,
+        "INFORMATION_STRUCTURE_DIAGRAM": information_diagram,
         "INFORMATION_STRUCTURE_ROWS": information_rows,
     }
 
@@ -313,6 +367,34 @@ def validate_arguments(
         )
 
 
+def select_layout(output_root: Path, requested: str | None) -> str:
+    layouts = set()
+    for module in (output_root / "03_业务模块").glob("*/"):
+        if (module / "02_按身份").is_dir():
+            layouts.add("by-identity")
+        if (module / "02_页面PRD").is_dir() or any(module.glob("03_*验收PRD.md")):
+            layouts.add("shared")
+    if len(layouts) > 1:
+        raise ValueError("现有项目混合使用共享和身份布局，请按模块手工补充模板，脚本不迁移结构。")
+    existing = next(iter(layouts), None)
+    if existing and requested and existing != requested:
+        raise ValueError("指定布局与现有结构不同；请保留原布局，迁移需要独立处理。")
+    return requested or existing or "shared"
+
+
+def add_pages(writer: Writer, page_dir: str, page_base: str,
+              module_safe: str, context: dict[str, str]) -> None:
+    for index, (kind, template) in enumerate([
+        ("列表页", "页面PRD/列表页PRD模板.md"),
+        ("详情页", "页面PRD/详情页PRD模板.md"),
+    ], 1):
+        page_id = f"{page_base}-{index:03d}"
+        writer.add(f"{page_dir}/{page_id}_{module_safe}{kind}PRD.md", template,
+                   dict(context, DOC_ID=f"DOC-{page_id}", PAGE_ID=page_id,
+                        PAGE_NAME=f"{context['MODULE_NAME']}{kind}",
+                        COMPONENT_ID="[待确认组件ID]", COMPONENT_NAME="[待确认组件]"))
+
+
 def scaffold() -> int:
     args = parse_args()
     project_root = Path(args.project_root).expanduser().resolve()
@@ -327,6 +409,11 @@ def scaffold() -> int:
     endpoints = parse_mapping(args.endpoint, "--endpoint")
     module_roles = parse_mapping(args.module_role, "--module-role")
     validate_arguments(roles, modules, endpoints, module_roles)
+    layout = select_layout(output_root, args.layout)
+    if modules and not roles:
+        raise ValueError("生成模块前需要通过 --role 声明已确认角色／业务身份。")
+    if args.include_core_pages and any(role not in endpoints for role in roles):
+        raise ValueError("创建页面前需要为所列角色确认 --endpoint，不生成端口待确认目录。")
 
     today = dt.date.today().isoformat()
     common = project_context(args.project_name, roles, modules, endpoints, today)
@@ -339,7 +426,7 @@ def scaffold() -> int:
         ("04_产品功能架构.md", "项目级产品文档/产品功能架构模板.md"),
         ("05_信息架构与导航结构.md", "项目级产品文档/信息架构与导航结构模板.md"),
     ]
-    for index, (filename, template) in enumerate(project_files, 1):
+    for index, (filename, template) in enumerate(project_files if args.scope == "project" else [], 1):
         context = dict(common, DOC_ID=f"DOC-P-{index:03d}")
         if template == "项目级产品文档/产品功能架构模板.md":
             rows = "\n".join(
@@ -355,7 +442,7 @@ def scaffold() -> int:
     endpoint_values = unique(
         [endpoint for values in endpoints.values() for endpoint in values]
     )
-    for endpoint_number, endpoint in enumerate(endpoint_values, 1):
+    for endpoint_number, endpoint in enumerate(endpoint_values if args.scope == "project" else [], 1):
         endpoint_safe = safe_segment(endpoint, "端口")
         endpoint_dir = f"02_端口产品视图/E{endpoint_number:02d}_{endpoint_safe}"
         roles_for_endpoint = endpoint_roles(endpoint, roles, endpoints)
@@ -397,6 +484,24 @@ def scaffold() -> int:
             )
 
         selected_roles = module_roles.get(module, roles)
+        if layout == "shared":
+            writer.add(
+                f"{module_dir}/03_{module_safe}验收PRD.md", "验收文档/验收PRD模板.md",
+                dict(module_context, DOC_ID=f"DOC-M{module_number:02d}-ACC",
+                     ACCEPTANCE_NAME=module),
+            )
+            if args.include_core_pages:
+                for endpoint_number, endpoint in enumerate(endpoint_values, 1):
+                    applicable = endpoint_roles(endpoint, selected_roles, endpoints)
+                    if not applicable:
+                        continue
+                    endpoint_safe = safe_segment(endpoint, "端口")
+                    add_pages(
+                        writer, f"{module_dir}/02_页面PRD/E{endpoint_number:02d}_{endpoint_safe}",
+                        f"P-M{module_number:02d}-E{endpoint_number:02d}", module_safe,
+                        dict(module_context, ROLE_NAME="、".join(applicable), ENDPOINT_NAME=endpoint),
+                    )
+            continue
         for role in selected_roles:
             role_number = role_indexes[role]
             role_safe = safe_segment(role, "角色")
@@ -433,7 +538,7 @@ def scaffold() -> int:
             )
 
             if args.include_core_pages:
-                selected_endpoints = endpoints.get(role, ["端口待确认"])
+                selected_endpoints = endpoints[role]
                 for endpoint_number, endpoint in enumerate(selected_endpoints, 1):
                     endpoint_safe = safe_segment(endpoint, "端口")
                     page_dir = (
@@ -447,30 +552,10 @@ def scaffold() -> int:
                     page_common = dict(
                         identity_context,
                         ENDPOINT_NAME=endpoint,
-                        COMPONENT_ID="[待确认组件ID]",
-                        COMPONENT_NAME="[待确认组件]",
                     )
-                    writer.add(
-                        f"{page_dir}/{page_base}-001_{module_safe}列表页PRD.md",
-                        "页面PRD/列表页PRD模板.md",
-                        dict(
-                            page_common,
-                            DOC_ID=f"DOC-{page_base}-001",
-                            PAGE_ID=f"{page_base}-001",
-                            PAGE_NAME=f"{module}列表页",
-                        ),
-                    )
-                    writer.add(
-                        f"{page_dir}/{page_base}-002_{module_safe}详情页PRD.md",
-                        "页面PRD/详情页PRD模板.md",
-                        dict(
-                            page_common,
-                            DOC_ID=f"DOC-{page_base}-002",
-                            PAGE_ID=f"{page_base}-002",
-                            PAGE_NAME=f"{module}详情页",
-                        ),
-                    )
+                    add_pages(writer, page_dir, page_base, module_safe, page_common)
 
+    writer.commit()
     writer.report()
     return 0
 

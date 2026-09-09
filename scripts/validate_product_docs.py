@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""校验中文产品文档的目录和核心内容。"""
-
+"""检查产品文档的结构与显式引用；不证明业务语义或验收通过。"""
 from __future__ import annotations
 
 import argparse
@@ -8,364 +7,308 @@ import re
 import sys
 from collections import defaultdict
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
-
-DOC_ID_RE = re.compile(r'^doc_id:\s*["\']?([^"\'\n]+)["\']?\s*$', re.MULTILINE)
-DOC_TYPE_RE = re.compile(
-    r'^document_type:\s*["\']?([^"\'\n]+)["\']?\s*$',
-    re.MULTILINE,
-)
-PLACEHOLDER_RE = re.compile(r"\{\{[A-Z0-9_]+\}\}")
+try:
+    from doc_support import MARKDOWN, PLACEHOLDER_RE, PENDING_RE, frontmatter, heading_name, module_key, table_cells
+except RuntimeError as exc:
+    print(f"错误：{exc}", file=sys.stderr)
+    raise SystemExit(2)
 
 PROJECT_FILES = [
-    "01_项目总体方案.md",
-    "02_产品总PRD.md",
-    "03_项目范围与版本规划.md",
-    "04_产品功能架构.md",
-    "05_信息架构与导航结构.md",
+    "01_项目总体方案.md", "02_产品总PRD.md", "03_项目范围与版本规划.md",
+    "04_产品功能架构.md", "05_信息架构与导航结构.md",
 ]
-
-SCOPES = (
-    "all",
-    "project",
-    "endpoint",
-    "module-common",
-    "identity",
-    "page",
-)
-
-REQUIRED_SECTIONS: dict[str, list[str]] = {
-    "project-overall": [
-        "## 2. 建设目标与成功标准",
-        "## 6. 项目范围摘要",
-        "## 8. 产品模块规划",
-    ],
-    "product-master-prd": [
-        "## 4. 角色、组织与数据范围",
-        "## 6. 信息结构图",
-        "### 6.1 信息结构节点说明",
-        "### 6.2 结构关系说明",
-        "## 7. 业务故事版",
-        "### 7.1 BS-",
-        "#### 故事步骤",
-        "## 8. 核心跨模块业务流程",
-        "## 9. 全局业务规则",
-        "flowchart TD",
-    ],
-    "module-master-prd": [
-        "## 2. 模块范围与边界",
-        "## 5. 业务故事版",
-        "### 5.1 BS-",
-        "#### 故事步骤",
-        "## 6. 公共业务流程",
-        "## 8. 公共业务规则",
-        "## 11. 异常与边界场景",
-    ],
-    "module-function-list": [
-        "## 功能追踪与覆盖",
-        "规则ID/核心规则",
-        "失败与异常",
-    ],
-    "module-business-flow-state-transition": [
-        "## 一、业务流程",
-        "### 4. 主流程",
-        "### 9. 时限、通知与补偿",
-        "业务规则与权限校验",
-        "## 二、状态流转",
-        "### 2. 状态定义",
-        "### 3. 状态流转表",
-        "### 5. 各角色状态展示与操作",
-        "### 7. 超时、自动流转与并发控制",
-    ],
-    "module-field-dictionary": [
-        "## 一、头部字段（单据级）",
-        "## 二、明细字段（行项目级）",
-        "## 三、状态、金额、审计及派生字段",
-        "## 四、枚举与选项",
-        "## 五、字段联动、计算与校验",
-        "## 六、身份与端口差异",
-        "字段ID | 字段名称 | 字段来源 | 取值说明 | 必填性 | 新增页 | 编辑页 | 列表展示 | 可筛选 | 详情展示 | 字段说明 | 备注",
-    ],
-    "role-module-master-prd": [
-        "## 4. 数据范围",
-        "## 7. 状态展示与操作",
-        "## 9. 字段可见性与编辑原则",
-        "## 10. 身份操作权限",
-        "## 11. 消息、通知、操作记录与异常",
-    ],
-    "role-module-function-list": [
-        "## 页面与验收追踪",
-        "成功结果",
-        "失败与异常",
-    ],
-    "list-page-prd": [
-        "## 4. 查询区域",
-        "## 5. 列表字段",
-        "### 7.4 导出、打印与下载",
-        "## 8. 弹窗、抽屉及二次交互",
-        "## 9. 页面状态",
-        "## 13. 验收标准",
-        "| 路由/页面地址 |",
-    ],
-    "detail-page-prd": [
-        "## 4. 信息分组与字段",
-        "### 4.3 明细、子表与嵌套数据",
-        "## 6. 页面操作",
-        "### 6.1 打印、导出与下载",
-        "## 7. 弹窗、抽屉及二次交互",
-        "## 8. 页面状态",
-        "## 12. 验收标准",
-        "| 路由/页面地址 |",
-    ],
-    "generic-page-prd": [
-        "## 3. 字段与内容",
-        "## 6. 弹窗、抽屉及二次交互",
-        "## 7. 页面状态",
-        "## 10. 验收标准",
-        "| 路由/页面地址 |",
-        "| 取消与关闭规则 |",
-    ],
-    "acceptance-prd": [
-        "## 5. 功能与页面验收用例",
-        "## 7. 查询与列表验收",
-        "## 9. 权限与数据范围验收",
-        "## 10. 弹窗、抽屉及交互验收",
-        "## 12. 业务规则、边界与并发验收",
-        "## 13. 通知与操作记录验收",
-        "## 16. 需求覆盖检查",
-    ],
+# Minimum section concepts. Numbering is ignored; aliases are intentional, bounded equivalents.
+REQUIRED_SECTIONS = {
+    "project-overall": ["建设目标与成功标准", "项目范围摘要", "产品模块规划"],
+    "product-master-prd": ["角色、组织与数据范围", "信息结构图", "核心跨模块业务流程", "全局业务规则"],
+    "scope-version-plan": ["本期范围", "非本期范围", "版本规划"],
+    "functional-architecture": ["功能分层", "模块职责与边界", "模块依赖关系"],
+    "information-architecture-navigation": ["页面层级", "页面入口与出口", "跨模块跳转"],
+    "endpoint-function-list": ["端口定义", "按业务模块划分的功能清单", "端口边界与不可用能力"],
+    "endpoint-core-journey": ["旅程概览", "主旅程", "分支与异常旅程"],
+    "module-master-prd": ["模块范围与边界", "公共业务规则", "权限与数据原则", "异常与边界场景"],
+    "module-function-list": ["功能边界说明", "功能追踪与覆盖"],
+    "module-business-flow-state-transition": ["业务流程", "状态流转"],
+    "module-field-dictionary": ["头部字段（单据级）", "明细字段（行项目级）", "状态、金额、审计及派生字段", "枚举与选项", "字段联动、计算与校验"],
+    "role-module-master-prd": ["数据范围", "状态展示与操作", "字段可见性与编辑原则", "身份操作权限"],
+    "role-module-function-list": ["与模块公共功能的关系", "页面与验收追踪"],
+    "list-page-prd": [("查询区域", "查询条件"), "列表字段", "弹窗、抽屉及二次交互", "页面状态", "验收标准"],
+    "detail-page-prd": ["信息分组与字段", "页面操作", "弹窗、抽屉及二次交互", "页面状态", "验收标准"],
+    "generic-page-prd": ["字段与内容", "页面操作", "页面状态", "验收标准"],
+    "acceptance-prd": ["验收范围", "功能与页面验收用例", "权限与数据范围验收", "需求覆盖检查"],
+    "supplement": [],
+}
+PAGE_TYPES = {"list-page-prd", "detail-page-prd", "generic-page-prd"}
+ID_RE = re.compile(r"(?<![A-Za-z0-9_-])(?:REQ|F|BR|RULE|RUL|FLD|P|AC|ST|STATE|TR|TRANS|STEP|ACT|EF|TP|OP|CMP|SCN)-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*(?![A-Za-z0-9_-])")
+DEFINITION_HEADERS = {
+    "product-master-prd": {"规则ID"},
+    "module-master-prd": {"需求ID", "规则ID"},
+    "module-function-list": {"功能ID"},
+    "module-field-dictionary": {"字段ID", "规则ID"},
+    "module-business-flow-state-transition": {"步骤ID", "状态ID", "流转ID", "动作ID", "影响面ID", "时点ID", "场景ID", "异常ID"},
+    "role-module-master-prd": {"操作ID", "差异ID"},
+    "acceptance-prd": {"验收ID"},
+    "list-page-prd": {"操作ID", "组件ID"},
+    "detail-page-prd": {"操作ID", "组件ID"},
+    "generic-page-prd": {"操作ID", "组件ID"},
 }
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="校验结构化中文产品文档。")
-    parser.add_argument("--project-root", required=True, help="项目根目录。")
-    parser.add_argument("--docs-dir", default="docs/product", help="文档目录。")
-    parser.add_argument(
-        "--scope",
-        choices=SCOPES,
-        default="all",
-        help=(
-            "校验范围：all全量、project项目级、endpoint端口产品视图、"
-            "module-common业务模块公共主文档、identity按身份模块文档、page页面PRD。"
-        ),
-    )
-    parser.add_argument(
-        "--strict",
-        action="store_true",
-        help="将所有警告视为校验失败。",
-    )
-    return parser.parse_args()
+def parse_document(path: Path, docs_root: Path) -> dict:
+    metadata, body, offset = frontmatter(path.read_text(encoding="utf-8-sig"))
+    tokens = MARKDOWN.parse(body)
+    headings = set()
+    for index, token in enumerate(tokens):
+        if token.type == "heading_open":
+            headings.add(heading_name(tokens[index + 1].content))
+    lines = body.splitlines()
+    tables, table = [], None
+    for token in tokens:
+        if token.type == "table_open":
+            table = {"header": [], "rows": []}
+        elif token.type == "tr_open" and token.map and table is not None:
+            line_number = token.map[0]
+            cells = table_cells(lines[line_number])
+            if not table["header"]:
+                table["header"] = cells
+            else:
+                table["rows"].append((line_number + offset + 1, cells))
+        elif token.type == "table_close":
+            tables.append(table)
+            table = None
+    return dict(path=path, meta=metadata, body=body, offset=offset, tokens=tokens,
+                headings=headings, tables=tables, module=module_key(path, docs_root))
 
 
-def contains_all(directory: Path, fragments: list[str]) -> bool:
-    if not directory.is_dir():
-        return False
-    names = [path.name for path in directory.iterdir() if path.is_file()]
-    return all(any(fragment in name for name in names) for fragment in fragments)
+def select_files(root: Path, all_files: list[Path], scope: str, modules: list[str], files: list[str]) -> set[Path]:
+    if scope == "files":
+        if not files:
+            raise ValueError("--scope files 需要至少一个 --file（相对文档目录）")
+        selected = set()
+        for name in files:
+            path = (root / name).resolve()
+            if not path.is_relative_to(root) or path not in all_files:
+                raise ValueError(f"选定文件不存在、不是 Markdown 或不在文档目录内：{name}")
+            selected.add(path)
+        return selected
+    if scope == "module":
+        if not modules:
+            raise ValueError("--scope module 需要至少一个 --module")
+        parent = root / "03_业务模块"
+        available = [p for p in parent.iterdir() if p.is_dir()] if parent.is_dir() else []
+        selected = set()
+        for name in modules:
+            matches = [p for p in available if p.name == name or p.name.startswith(name + "_")]
+            if len(matches) != 1:
+                raise ValueError(f"模块选择必须唯一匹配目录名或编号：{name}")
+            selected.update(p for p in all_files if p.is_relative_to(matches[0]))
+        return selected
+    return set(all_files)
 
 
-def scoped_markdown_files(docs_root: Path, scope: str) -> list[Path]:
-    if scope == "all":
-        return sorted(docs_root.rglob("*.md"))
-
-    files: set[Path] = set()
+def check_layout(root: Path, selected: set[Path], scope: str, errors: list[str], warnings: list[str]) -> None:
     if scope == "project":
-        files.update((docs_root / "01_项目级产品文档").rglob("*.md"))
-    elif scope == "endpoint":
-        files.update((docs_root / "02_端口产品视图").rglob("*.md"))
-    else:
-        modules_dir = docs_root / "03_业务模块"
-        if modules_dir.is_dir():
-            for module_dir in modules_dir.iterdir():
-                if not module_dir.is_dir():
-                    continue
-                if scope == "module-common":
-                    files.update(
-                        (module_dir / "01_业务模块主文档").rglob("*.md")
-                    )
-                    continue
-                identities_dir = module_dir / "02_按身份"
-                if not identities_dir.is_dir():
-                    continue
-                for identity_dir in identities_dir.iterdir():
-                    if not identity_dir.is_dir():
-                        continue
-                    if scope == "identity":
-                        files.update(identity_dir.glob("*.md"))
-                    elif scope == "page":
-                        files.update(
-                            (identity_dir / "03_页面PRD").rglob("*.md")
-                        )
-    return sorted(files)
+        for name in PROJECT_FILES:
+            if not (root / "01_项目级产品文档" / name).is_file():
+                errors.append(f"缺少项目级文档：{name}")
+        for name in ["02_端口产品视图", "03_业务模块"]:
+            if not (root / name).is_dir():
+                warnings.append(f"缺少目录：{name}；请人工确认是否在交付范围")
+    if scope not in {"project", "module"}:
+        return
+    modules = root / "03_业务模块"
+    if not modules.is_dir():
+        return
+    for module in sorted(p for p in modules.iterdir() if p.is_dir()):
+        if scope == "module" and not any(p.is_relative_to(module) for p in selected):
+            continue
+        names = [p.name for p in (module / "01_业务模块主文档").glob("*.md")]
+        for fragment in ["模块主PRD", "模块功能清单", "业务流程与状态流转", "字段字典"]:
+            if not any(fragment in name for name in names):
+                errors.append(f"模块公共文档缺少{fragment}：{module.name}")
+        identities = module / "02_按身份"
+        if identities.is_dir():
+            identity_dirs = [p for p in identities.iterdir() if p.is_dir()]
+            if not identity_dirs:
+                warnings.append(f"身份目录为空：{module}")
+            for identity in identity_dirs:
+                for fragment in ["模块主PRD", "模块功能清单", "验收PRD"]:
+                    if not any(fragment in p.name for p in identity.glob("*.md")):
+                        errors.append(f"身份文档缺少{fragment}：{identity}")
+        elif not any("验收PRD" in p.name for p in module.glob("*.md")):
+            warnings.append(f"模块尚无共享验收PRD：{module.name}")
+    if scope == "project":
+        endpoints = root / "02_端口产品视图"
+        if endpoints.is_dir():
+            for endpoint in [p for p in endpoints.iterdir() if p.is_dir()]:
+                for fragment in ["端口功能清单", "端口核心业务旅程"]:
+                    if not any(fragment in p.name for p in endpoint.glob("*.md")):
+                        errors.append(f"端口文档缺少{fragment}：{endpoint.name}")
 
 
-def validate(docs_root: Path, scope: str) -> tuple[list[str], list[str]]:
-    errors: list[str] = []
-    warnings: list[str] = []
-
-    if not docs_root.is_dir():
-        return [f"产品文档目录不存在：{docs_root}"], warnings
-
-    project_dir = docs_root / "01_项目级产品文档"
-    if scope in {"all", "project"}:
-        for filename in PROJECT_FILES:
-            if not (project_dir / filename).is_file():
-                errors.append(f"缺少项目级文档：{project_dir / filename}")
-
-    endpoints_dir = docs_root / "02_端口产品视图"
-    if scope in {"all", "endpoint"}:
-        if not endpoints_dir.is_dir():
-            message = f"缺少端口产品视图目录：{endpoints_dir}"
-            if scope == "endpoint":
-                errors.append(message)
+def validate(docs_root: Path, *, scope: str = "present", modules=None, files=None,
+             phase: str = "draft", project_root: Path | None = None) -> tuple[list[str], list[str]]:
+    root = docs_root.resolve()
+    project_root = (project_root or root).resolve()
+    errors, warnings = [], []
+    if not root.is_dir():
+        return [f"产品文档目录不存在：{root}"], []
+    all_files = sorted({p.resolve() for p in root.rglob("*.md") if p.resolve().is_relative_to(root)})
+    try:
+        selected = select_files(root, all_files, scope, modules or [], files or [])
+    except ValueError as exc:
+        return [str(exc)], []
+    if not selected:
+        return ["本次范围没有 Markdown 文档"], []
+    check_layout(root, selected, scope, errors, warnings)
+    documents = []
+    for path in all_files:
+        try:
+            documents.append(parse_document(path, root))
+        except (ValueError, OSError) as exc:
+            if path in selected:
+                errors.append(f"{path}：{exc}")
+    doc_ids, page_ids, definitions = defaultdict(list), defaultdict(list), defaultdict(list)
+    usages = []
+    for doc in documents:
+        path, metadata = doc["path"], doc["meta"]
+        doc_type = metadata.get("document_type")
+        if not isinstance(doc_type, str):
+            doc_type = ""
+        identifier = metadata.get("doc_id")
+        if isinstance(identifier, str) and identifier.strip():
+            doc_ids[identifier].append(path)
+        if doc_type in PAGE_TYPES and isinstance(metadata.get("page_id"), str):
+            page_ids[metadata["page_id"]].append(path)
+            definitions[metadata["page_id"]].append((path, doc["module"]))
+        explicit = metadata.get("defines", [])
+        if isinstance(explicit, list):
+            for item in explicit:
+                if isinstance(item, str) and item:
+                    definitions[item].append((path, doc["module"]))
+        owned = DEFINITION_HEADERS.get(doc_type, set())
+        field_rows = defaultdict(list)
+        for table in doc["tables"]:
+            header = table["header"]
+            if not header or header[0] not in owned:
+                continue
+            # Projection/coverage tables reference IDs; primary field rows include a field name.
+            if header[0] == "字段ID" and "字段名称" not in header:
+                continue
+            if header[0] == "功能ID" and not any(c in header for c in ["功能点", "功能名称"]):
+                continue
+            for line, cells in table["rows"]:
+                for item in ID_RE.findall(cells[0] if cells else ""):
+                    definitions[item].append((path, doc["module"]))
+                    if header[0] == "字段ID":
+                        field_rows[item].append(line)
+        if path in selected:
+            for item, lines in field_rows.items():
+                if len(lines) > 1:
+                    errors.append(f"字段ID重复定义：{item}，{path}，行 {lines}")
+            if not isinstance(identifier, str) or not identifier.strip():
+                errors.append(f"缺少有效 doc_id：{path}")
+            if doc_type not in REQUIRED_SECTIONS:
+                errors.append(f"未知或缺少 document_type：{metadata.get('document_type')!r}，{path}")
             else:
-                warnings.append(message)
-        else:
-            endpoint_dirs = sorted(
-                path for path in endpoints_dir.iterdir() if path.is_dir()
-            )
-            if scope == "endpoint" and not endpoint_dirs:
-                errors.append(f"没有可校验的端口产品视图：{endpoints_dir}")
-            for endpoint_dir in endpoint_dirs:
-                if not contains_all(
-                    endpoint_dir,
-                    ["端口功能清单", "端口核心业务旅程"],
-                ):
-                    errors.append(f"端口产品视图不完整：{endpoint_dir}")
-
-    modules_dir = docs_root / "03_业务模块"
-    module_scopes = {"all", "module-common", "identity", "page"}
-    if scope in module_scopes:
-        if not modules_dir.is_dir():
-            message = f"缺少业务模块目录：{modules_dir}"
-            if scope == "all":
-                warnings.append(message)
-            else:
-                errors.append(message)
-        else:
-            module_dirs = sorted(
-                path for path in modules_dir.iterdir() if path.is_dir()
-            )
-            if scope != "all" and not module_dirs:
-                errors.append(f"没有可校验的业务模块：{modules_dir}")
-            for module_dir in module_dirs:
-                if scope in {"all", "module-common"}:
-                    common_dir = module_dir / "01_业务模块主文档"
-                    if not contains_all(
-                        common_dir,
-                        [
-                            "模块主PRD",
-                            "模块功能清单",
-                            "业务流程与状态流转",
-                            "字段字典",
-                        ],
-                    ):
-                        errors.append(f"业务模块主文档不完整：{common_dir}")
-
-                if scope not in {"all", "identity", "page"}:
+                for required in REQUIRED_SECTIONS[doc_type]:
+                    choices = required if isinstance(required, tuple) else (required,)
+                    if not any(name in doc["headings"] for name in choices):
+                        errors.append(f"缺少章节“{'／'.join(choices)}”：{path}")
+            if not doc["body"].strip():
+                errors.append(f"文档正文为空：{path}")
+            if doc_type in PAGE_TYPES and (not isinstance(metadata.get("page_id"), str) or not metadata["page_id"].strip()):
+                errors.append(f"页面缺少 page_id：{path}")
+            for key in ["defines", "references"]:
+                values = metadata.get(key, [])
+                if not isinstance(values, list) or any(not isinstance(v, str) or not v.strip() for v in values):
+                    errors.append(f"{key} 必须是非空 ID 字符串的列表：{path}")
+            combined = path.read_text(encoding="utf-8-sig")
+            if PLACEHOLDER_RE.search(combined):
+                errors.append(f"存在未替换模板变量：{path}")
+            if PENDING_RE.search(combined):
+                message = f"{path}：{len(PENDING_RE.findall(combined))} 处待确认"
+                (errors if phase == "final" else warnings).append(message)
+            if not metadata.get("sources"):
+                (errors if phase == "final" else warnings).append(f"缺少来源依据 sources：{path}")
+            elif not isinstance(metadata["sources"], list) or any(
+                not isinstance(value, str) or not value.strip() for value in metadata["sources"]
+            ):
+                errors.append(f"sources 必须是可定位来源的非空字符串列表：{path}")
+            for table in doc["tables"]:
+                for line, cells in table["rows"]:
+                    if len(cells) != len(table["header"]):
+                        errors.append(f"表格列数不一致：{path}:{line}，表头 {len(table['header'])} 列，数据 {len(cells)} 列")
+            reference_values = metadata.get("references", [])
+            if isinstance(reference_values, list):
+                usages.extend((str(v), path, doc["module"]) for v in reference_values if isinstance(v, str))
+            for token in doc["tokens"]:
+                if token.type != "inline":
                     continue
-
-                identities_dir = module_dir / "02_按身份"
-                if not identities_dir.is_dir():
-                    message = f"模块尚未按身份生成文档：{identities_dir}"
-                    if scope == "all":
-                        warnings.append(message)
-                    else:
-                        errors.append(message)
-                    continue
-
-                identity_dirs = sorted(
-                    path for path in identities_dir.iterdir() if path.is_dir()
-                )
-                if scope in {"identity", "page"} and not identity_dirs:
-                    errors.append(f"没有可校验的身份目录：{identities_dir}")
-                for identity_dir in identity_dirs:
-                    if scope in {"all", "identity"} and not contains_all(
-                        identity_dir,
-                        ["模块主PRD", "模块功能清单", "验收PRD"],
-                    ):
-                        errors.append(f"按身份划分的模块文档不完整：{identity_dir}")
-
-                    if scope not in {"all", "page"}:
+                usages.extend((v, path, doc["module"]) for v in ID_RE.findall(token.content))
+                for child in token.children or []:
+                    if child.type not in {"link_open", "image"}:
                         continue
-
-                    page_dir = identity_dir / "03_页面PRD"
-                    page_prds = (
-                        [path for path in page_dir.rglob("*.md")]
-                        if page_dir.is_dir()
-                        else []
-                    )
-                    if not page_prds:
-                        message = f"尚未生成具体页面PRD：{page_dir}"
-                        if scope == "all":
-                            warnings.append(message)
-                        else:
-                            errors.append(message)
-
-    markdown_files = scoped_markdown_files(docs_root, scope)
-    if scope != "all" and not markdown_files:
-        errors.append(f"指定范围没有可校验的Markdown文档：{scope}")
-    ids: dict[str, list[Path]] = defaultdict(list)
-    pending_count = 0
-
-    for path in markdown_files:
-        content = path.read_text(encoding="utf-8")
-        if PLACEHOLDER_RE.search(content):
-            errors.append(f"存在未替换的模板变量：{path}")
-
-        doc_id_match = DOC_ID_RE.search(content)
-        if not doc_id_match:
-            errors.append(f"缺少doc_id：{path}")
-        else:
-            ids[doc_id_match.group(1).strip()].append(path)
-
-        doc_type_match = DOC_TYPE_RE.search(content)
-        if not doc_type_match:
-            errors.append(f"缺少document_type：{path}")
-        else:
-            doc_type = doc_type_match.group(1).strip()
-            for section in REQUIRED_SECTIONS.get(doc_type, []):
-                if section not in content:
-                    errors.append(f"缺少章节“{section}”：{path}")
-
-        pending_count += content.count("[待确认]")
-
-    for doc_id, paths in ids.items():
-        if len(paths) > 1:
-            joined = "、".join(str(path) for path in paths)
-            errors.append(f"文档ID重复：{doc_id}，涉及{joined}")
-
-    if pending_count:
-        warnings.append(f"共有{pending_count}处[待确认]")
-
-    return errors, warnings
+                    href = child.attrGet("href" if child.type == "link_open" else "src") or ""
+                    parsed = urlsplit(href)
+                    if parsed.scheme or parsed.netloc or not parsed.path:
+                        continue
+                    target = (path.parent / unquote(parsed.path)).resolve()
+                    if not target.is_file():
+                        errors.append(f"本地链接目标不存在：{path} → {href}")
+                    # Anchor correctness and remote availability are explicitly outside this checker.
+    for label, ids in [("文档ID", doc_ids), ("页面ID", page_ids)]:
+        for item, paths in ids.items():
+            if len(set(paths)) > 1 and any(path in selected for path in paths):
+                errors.append(f"{label}重复：{item}，涉及 {'、'.join(map(str, paths))}")
+    for item, locations in definitions.items():
+        grouped = defaultdict(set)
+        for path, module in locations:
+            grouped[module].add(path)
+        for module, paths in grouped.items():
+            if len(paths) > 1 and any(path in selected for path in paths):
+                errors.append(f"ID 存在多个权威定义：{item}，涉及 {'、'.join(map(str, sorted(paths)))}")
+    for item, path, module in sorted(set(usages), key=lambda x: (str(x[1]), x[0])):
+        locations = set(definitions.get(item, []))
+        local = {p for p, m in locations if m == module}
+        global_locations = {p for p, m in locations}
+        if not locations:
+            errors.append(f"未定义的ID引用：{item}，{path}")
+        elif not local and len(global_locations) > 1:
+            errors.append(f"跨模块ID引用不唯一：{item}，{path}")
+    return list(dict.fromkeys(errors)), list(dict.fromkeys(warnings))
 
 
 def main() -> int:
-    args = parse_args()
-    project_root = Path(args.project_root).expanduser().resolve()
-    docs_root = (project_root / args.docs_dir).resolve()
-    try:
-        docs_root.relative_to(project_root)
-    except ValueError:
-        print("错误：--docs-dir必须位于项目根目录内", file=sys.stderr)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--project-root", required=True)
+    parser.add_argument("--docs-dir", default="docs/product")
+    parser.add_argument("--scope", choices=["present", "project", "module", "files"], default="present",
+                        help="默认只检查已有文档；project 才检查完整默认目录。")
+    parser.add_argument("--module", action="append", default=[])
+    parser.add_argument("--file", action="append", default=[], help="相对文档目录的 Markdown 文件，可重复。")
+    parser.add_argument("--phase", choices=["draft", "final"], default="draft")
+    parser.add_argument("--strict", action="store_true", help="将本次范围所有警告视为失败。")
+    args = parser.parse_args()
+    if (args.module and args.scope != "module") or (args.file and args.scope != "files"):
+        parser.error("--module 仅配合 --scope module；--file 仅配合 --scope files")
+    project = Path(args.project_root).expanduser().resolve()
+    root = (project / args.docs_dir).resolve()
+    if not root.is_relative_to(project):
+        print("错误：--docs-dir 必须位于项目目录内", file=sys.stderr)
         return 2
-
-    errors, warnings = validate(docs_root, args.scope)
-
-    print(f"校验目录：{docs_root}")
-    print(f"校验范围：{args.scope}")
-    print(f"错误：{len(errors)}")
+    errors, warnings = validate(root, scope=args.scope, modules=args.module, files=args.file,
+                                phase=args.phase, project_root=project)
+    print(f"校验目录：{root}\n范围：{args.scope}；阶段：{args.phase}\n错误：{len(errors)}")
     for item in errors:
         print(f"  错误：{item}")
     print(f"警告：{len(warnings)}")
     for item in warnings:
         print(f"  警告：{item}")
-
-    if errors or (args.strict and warnings):
-        return 1
-    return 0
+    print("检查范围：元数据、最小章节、显式ID、本地文件链接及表格列数；业务语义、覆盖充分性、链接锚点、远程链接和 Mermaid 语法需另行审核。")
+    return 1 if errors or (args.strict and warnings) else 0
 
 
 if __name__ == "__main__":
