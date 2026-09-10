@@ -221,12 +221,11 @@ class ProductDocsTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(before, self.fingerprint())
 
-    def test_reordered_modules_fail_before_writing(self):
+    def test_reordered_modules_preserve_existing_ids_and_contents(self):
         self.assertEqual(self.scaffold(modules=('订单', '库存')).returncode, 0)
         before = self.fingerprint()
         result = self.scaffold(modules=('库存', '订单'))
-        self.assertEqual(result.returncode, 2)
-        self.assertIn('冲突', result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(before, self.fingerprint())
 
     def test_layout_change_rejected_before_writing(self):
@@ -296,6 +295,219 @@ class ProductDocsTests(unittest.TestCase):
             PAGE_NAME='编辑订单', MODULE_NAME='订单', ENDPOINT_NAME='PC',
             COMPONENT_ID='[待确认]', COMPONENT_NAME='[待确认]', DATE='2026-09-08'))
         (self.page().parent / '编辑订单.md').write_text(content, encoding='utf-8')
+        self.assertEqual(self.errors(), '')
+
+
+    def document(self, name, body, kind='supplement', extra=''):
+        self.docs.mkdir(parents=True, exist_ok=True)
+        path = self.docs / name
+        path.write_text(
+            f'---\ndoc_id: DOC-{path.stem}\ndocument_type: {kind}\n'
+            f'sources: ["隔离测试已确认事实"]\n{extra}---\n{body}\n', encoding='utf-8')
+        return path
+
+    def test_conflicting_action_definition_in_one_document(self):
+        self.document('flow.md', '## 业务流程\n| 动作ID | 动作名称 |\n|---|---|\n'
+                      '| ACT-M01-001 | 保存草稿 |\n| ACT-M01-001 | 作废订单 |\n'
+                      '## 状态流转\n不适用。', 'module-business-flow-state-transition')
+        self.assertIn('ID冲突定义', self.errors())
+
+    def test_identical_action_summary_and_split_controls_are_allowed(self):
+        self.document('flow.md', '## 业务流程\n| 动作ID | 动作名称 |\n|---|---|\n'
+                      '| ACT-M01-001 | 保存草稿 |\n\n'
+                      '| 动作ID | 动作名称 |\n|---|---|\n| ACT-M01-001 | 保存草稿 |\n\n'
+                      '| 动作ID | 失败处理 |\n|---|---|\n| ACT-M01-001 | 保留输入 |\n'
+                      '## 状态流转\n不适用。', 'module-business-flow-state-transition')
+        self.assertEqual(self.errors(), '')
+
+    def test_malformed_table_separator_is_rejected(self):
+        self.document('table.md', '# 表格\n| 字段 | 结果 |\n|---|---|---|\n| 数量 | 增加10 |')
+        self.assertIn('分隔行列数', self.errors())
+
+    def test_malformed_table_inside_code_fence_is_ignored(self):
+        self.document('code.md', '# 示例\n\x60\x60\x60text\n| 字段 | 结果 |\n'
+                      '|---|---|---|\n| 数量 | 增加10 |\n\x60\x60\x60')
+        self.assertEqual(self.errors(), '')
+
+    def test_selected_empty_module_is_not_skipped(self):
+        self.assertEqual(self.scaffold('--scope', 'module').returncode, 0)
+        (self.docs / '03_业务模块/M02_库存').mkdir()
+        errors = self.errors(scope='module', modules=['M01', 'M02'])
+        self.assertIn('M02_库存', errors)
+        self.assertIn('模块公共文档缺少', errors)
+
+    def test_single_empty_module_reports_missing_documents(self):
+        (self.docs / '03_业务模块/M02_库存').mkdir(parents=True)
+        self.assertIn('模块公共文档缺少', self.errors(scope='module', modules=['M02']))
+
+    def test_r_and_err_references_are_checked(self):
+        self.document('reference.md', '# 引用\nR-M01-MISSING 和 ERR-M01-MISSING')
+        errors = self.errors()
+        self.assertIn('未定义的ID引用：R-M01-MISSING', errors)
+        self.assertIn('未定义的ID引用：ERR-M01-MISSING', errors)
+
+    def test_custom_prefix_can_be_checked_without_renumbering(self):
+        self.document('custom.md', '# 引用\nCUSTOM-M01-MISSING')
+        self.assertEqual(self.errors(), '')
+        self.assertIn('CUSTOM-M01-MISSING', self.errors(id_prefixes=['CUSTOM']))
+
+    def test_invalid_custom_prefix_is_rejected(self):
+        self.document('custom.md', '# 内容\n正常说明。')
+        self.assertIn('编号前缀', self.errors(id_prefixes=['.*']))
+
+    def test_r_and_err_definitions_resolve_in_authority_tables(self):
+        self.baseline()
+        master = next(self.docs.rglob('*模块主PRD.md'))
+        with master.open('a', encoding='utf-8') as stream:
+            stream.write('\n| 规则ID | 规则 |\n|---|---|\n| R-M01-001 | 权限检查 |\n')
+        flow = next(self.docs.rglob('*业务流程与状态流转.md'))
+        with flow.open('a', encoding='utf-8') as stream:
+            stream.write('\n| 异常ID | 异常 |\n|---|---|\n| ERR-M01-001 | 权限不足 |\n')
+        self.append('执行 R-M01-001，失败见 ERR-M01-001。')
+        self.assertEqual(self.errors(), '')
+
+    def test_master_scene_is_a_reference_to_flow(self):
+        self.baseline()
+        master = next(self.docs.rglob('*模块主PRD.md'))
+        with master.open('a', encoding='utf-8') as stream:
+            stream.write('\n| 引用场景ID | 场景 |\n|---|---|\n| SCN-M01-001 | 重复提交 |\n')
+        self.assertIn('SCN-M01-001', self.errors())
+        flow = next(self.docs.rglob('*业务流程与状态流转.md'))
+        with flow.open('a', encoding='utf-8') as stream:
+            stream.write('\n| 场景ID | 场景 |\n|---|---|\n| SCN-M01-001 | 重复提交 |\n')
+        self.assertEqual(self.errors(), '')
+
+    def test_module_only_append_keeps_previous_files(self):
+        self.assertEqual(self.scaffold('--scope', 'module').returncode, 0)
+        before = self.fingerprint()
+        result = self.scaffold('--scope', 'module', modules=('库存',))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.docs / '03_业务模块/M02_库存').is_dir())
+        after = self.fingerprint()
+        self.assertTrue(all(after.get(path) == digest for path, digest in before.items()))
+        self.assertEqual(self.errors(), '')
+
+    def test_module_only_subset_reuses_nonfirst_existing_module(self):
+        self.assertEqual(self.scaffold('--scope', 'module', modules=('订单', '库存')).returncode, 0)
+        before = self.fingerprint()
+        result = self.scaffold('--scope', 'module', modules=('库存',))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(before, self.fingerprint())
+
+    def test_new_identity_pages_use_project_endpoint_ids(self):
+        result = self.scaffold('--layout', 'by-identity', '--include-core-pages',
+                               roles=('甲', '乙'), endpoints=('甲=PC,APP', '乙=APP'))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        pages = list(self.docs.rglob('*列表页PRD.md'))
+        app_pages = [p for p in pages if p.parent.name.endswith('_APP')]
+        self.assertEqual(len(app_pages), 2)
+        self.assertTrue(all(p.parent.name == 'E02_APP' for p in app_pages))
+
+    def test_reordered_roles_endpoints_keep_files(self):
+        self.assertEqual(self.scaffold('--layout', 'by-identity', '--include-core-pages',
+                                      roles=('甲', '乙'), endpoints=('甲=PC,APP', '乙=APP')).returncode, 0)
+        before = self.fingerprint()
+        result = self.scaffold('--layout', 'by-identity', '--include-core-pages',
+                               roles=('乙', '甲'), endpoints=('乙=APP', '甲=APP,PC'))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(before, self.fingerprint())
+
+    def test_existing_legacy_endpoint_folder_is_preserved(self):
+        result = self.scaffold('--layout', 'by-identity', '--include-core-pages',
+                               roles=('甲', '乙'), endpoints=('甲=PC,APP', '乙=APP'))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        identity = self.docs / '03_业务模块/M01_订单/02_按身份/R02_乙/03_页面PRD'
+        old = identity / 'E02_APP'
+        legacy = identity / 'E01_APP'
+        # Simulate a historical role-local endpoint number only inside this test workspace.
+        self.assertTrue(old.resolve().is_relative_to(self.root.resolve()))
+        self.assertTrue(legacy.resolve().is_relative_to(self.root.resolve()))
+        old.rename(legacy)
+        for page in list(legacy.glob('*.md')):
+            page.write_text(page.read_text(encoding='utf-8').replace('R02-E02', 'R02-E01'), encoding='utf-8')
+            page.rename(page.with_name(page.name.replace('R02-E02', 'R02-E01')))
+        before = self.fingerprint()
+        result = self.scaffold('--layout', 'by-identity', '--include-core-pages',
+                               roles=('甲', '乙'), endpoints=('甲=PC,APP', '乙=APP'))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(before, self.fingerprint())
+
+    def test_ambiguous_existing_module_numbers_stop_before_writes(self):
+        (self.docs / '03_业务模块/M01_订单').mkdir(parents=True)
+        (self.docs / '03_业务模块/M01_库存').mkdir()
+        before = self.fingerprint()
+        result = self.scaffold('--scope', 'module', modules=('客户',))
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(before, self.fingerprint())
+
+    def test_sanitized_module_name_collision_is_rejected(self):
+        result = self.scaffold('--scope', 'module', modules=('订单/报价', '订单\\报价'))
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse(self.docs.exists())
+
+    def test_split_function_tables_preserve_single_authority(self):
+        self.baseline()
+        functions = next(self.docs.rglob('*模块功能清单.md'))
+        with functions.open('a', encoding='utf-8') as stream:
+            stream.write('\n| 功能ID | 功能点 | 功能说明 |\n|---|---|---|\n'
+                         '| F-M01-001 | 新增订单 | 保存销售资料 |\n\n'
+                         '| 功能ID | 角色 | 页面ID |\n|---|---|---|\n'
+                         '| F-M01-001 | 销售员 | 不适用 |\n')
+        self.append('使用 F-M01-001。')
+        self.assertEqual(self.errors(), '')
+
+    def test_action_control_reference_does_not_create_definition(self):
+        self.document('flow.md', '## 业务流程\n| 动作ID | 失败处理 |\n|---|---|\n'
+                      '| ACT-M01-MISSING | 保留输入 |\n## 状态流转\n不适用。',
+                      'module-business-flow-state-transition')
+        self.assertIn('未定义的ID引用：ACT-M01-MISSING', self.errors())
+
+    def test_append_after_nonconsecutive_module_number(self):
+        (self.docs / '03_业务模块/M07_历史模块').mkdir(parents=True)
+        result = self.scaffold('--scope', 'module', modules=('新模块',))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.docs / '03_业务模块/M08_新模块').is_dir())
+        self.assertTrue((self.docs / '03_业务模块/M07_历史模块').is_dir())
+
+    def test_id_prefix_cli_reports_actual_coverage(self):
+        self.document('custom.md', '# 引用\nCUSTOM-M01-MISSING')
+        result = subprocess.run([sys.executable, '-B', '-X', 'utf8',
+                                 str(SCRIPTS / 'validate_product_docs.py'),
+                                 '--project-root', str(self.root), '--id-prefix', 'CUSTOM'],
+                                capture_output=True, text=True, encoding='utf-8')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('CUSTOM-M01-MISSING', result.stdout)
+        self.assertIn('自动检查编号前缀', result.stdout)
+
+    def test_split_module_function_template_retains_information(self):
+        from doc_support import table_cells
+        template = SCRIPTS.parent / 'assets/模板/业务模块主文档/模块功能清单模板.md'
+        headers = set()
+        for line in template.read_text(encoding='utf-8').splitlines():
+            if line.startswith('| 功能ID |'):
+                headers.update(table_cells(line))
+        required = {'功能ID', '一级功能', '二级功能', '功能点', '业务对象', '功能说明',
+                    '角色', '端口', '前置条件', '触发方式', '输入', '规则ID/核心规则',
+                    '成功输出', '失败与异常', '状态影响', '页面ID', '权限要求',
+                    '优先级', '版本', '状态', '来源'}
+        self.assertTrue(required.issubset(headers), required - headers)
+
+    def test_readable_trace_headers_are_valid_definitions(self):
+        self.document('flow.md', '## 业务流程\n'
+                      '| 动作ID | 对应页面 | 正文操作 |\n|---|---|---|\n'
+                      '| ACT-M01-001 | 编辑页 | 保存内容 |\n\n'
+                      '| 影响面ID | 正文中的数据名称 | 含义与归属 |\n|---|---|---|\n'
+                      '| EF-M01-001 | 内容记录 | 业务模块 |\n\n'
+                      '| 时点ID | 对应页面操作 | 中文时点说明 |\n|---|---|---|\n'
+                      '| TP-M01-001 | 保存 | 保存成功时 |\n'
+                      '## 状态流转\n| 状态ID | 名称 |\n|---|---|\n'
+                      '| ST-M01-001 | 有效 |', 'module-business-flow-state-transition')
+        self.assertEqual(self.errors(), '')
+
+    def test_component_title_is_a_valid_name(self):
+        self.baseline()
+        self.append('| 组件ID | 标题 | 类型 |\n|---|---|---|\n'
+                    '| CMP-M01-001 | 确认取消 | 弹窗 |')
         self.assertEqual(self.errors(), '')
 
 

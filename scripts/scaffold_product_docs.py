@@ -73,6 +73,74 @@ def safe_segment(value: str, label: str) -> str:
     return cleaned
 
 
+def numbered_directories(paths, prefix, output_root):
+    result = {}
+    numbers = {}
+    for path in sorted(paths):
+        if not path.is_dir():
+            continue
+        ensure_inside(output_root, path.resolve())
+        match = re.fullmatch(prefix + r"(\d+)_(.+)", path.name)
+        if not match:
+            continue
+        number, name = int(match[1]), match[2]
+        if number < 1:
+            raise ValueError(f"目录编号必须为正数：{path}")
+        if name in result and result[name] != number:
+            raise ValueError(f"同名目录编号冲突：{prefix} {name}")
+        if number in numbers and numbers[number] != name:
+            raise ValueError(f"目录编号对应多个名称：{prefix}{number:02d}")
+        result[name], numbers[number] = number, name
+    return result
+
+
+def assign_numbers(names, existing, label):
+    result = dict(existing)
+    normalized = {}
+    for name in names:
+        key = safe_segment(name, label)
+        if key in normalized and normalized[key] != name:
+            raise ValueError(f"{label}名称规范化后冲突：{normalized[key]!r} 与 {name!r}")
+        normalized[key] = name
+        if key not in result:
+            result[key] = max(result.values(), default=0) + 1
+    return {name: result[safe_segment(name, label)] for name in names}
+
+
+def discover_numbers(output_root, modules, roles, endpoints):
+    module_root = output_root / "03_业务模块"
+    existing_modules = numbered_directories(module_root.glob("*"), "M", output_root)
+    existing_roles = numbered_directories(module_root.glob("*/02_按身份/*"), "R", output_root)
+    canonical = numbered_directories((output_root / "02_端口产品视图").glob("*"), "E", output_root)
+    # Project endpoint folders take precedence. Old role-local numbers are preserved locally.
+    local_parents = sorted(module_root.glob("*/02_页面PRD"))
+    local_parents += sorted(module_root.glob("*/02_按身份/*/03_页面PRD"))
+    for parent in local_parents:
+        for name, number in numbered_directories(parent.glob("*"), "E", output_root).items():
+            if name not in canonical:
+                canonical[name] = number if number not in canonical.values() else max(canonical.values(), default=0) + 1
+    return (assign_numbers(modules, existing_modules, "模块"),
+            assign_numbers(roles, existing_roles, "角色"),
+            assign_numbers(endpoints, canonical, "端口"))
+
+
+def local_endpoint_numbers(parent, endpoints, canonical, output_root):
+    existing = numbered_directories(parent.glob("*"), "E", output_root)
+    used = set(existing.values())
+    result = {}
+    for endpoint in endpoints:
+        name = safe_segment(endpoint, "端口")
+        if name in existing:
+            number = existing[name]
+        else:
+            number = canonical[endpoint]
+            if number in used:
+                number = max(used | set(canonical.values()), default=0) + 1
+        result[endpoint] = number
+        used.add(number)
+    return result
+
+
 def parse_mapping(entries: list[str], label: str) -> dict[str, list[str]]:
     result: dict[str, list[str]] = {}
     for entry in entries:
@@ -152,7 +220,7 @@ class Writer:
             metadata, _, _ = frontmatter(content)
             identifier = metadata["doc_id"]
             if identifier in ids and ids[identifier] != path:
-                raise ValueError(f"文档ID与已有路径冲突：{identifier}；保留原模块/角色/端口顺序后重试，或手工补建。未写入文件。")
+                raise ValueError(f"文档ID与已有路径冲突：{identifier}；请核对已有名称、路径及编号，必要时手工补建。未写入文件。")
             if path.exists():
                 if not path.is_file():
                     raise ValueError(f"目标不是文件：{path}")
@@ -203,6 +271,7 @@ def information_structure(
     roles: list[str],
     modules: list[str],
     endpoints: dict[str, list[str]],
+    module_ids=None, role_ids=None, endpoint_ids=None,
 ) -> tuple[str, str]:
     endpoint_values = unique(
         [endpoint for values in endpoints.values() for endpoint in values]
@@ -226,6 +295,7 @@ def information_structure(
     ]
 
     for index, role in enumerate(roles or ["[待确认角色]"], 1):
+        index = (role_ids or {}).get(role, index)
         node_id = f"R{index:02d}"
         lines.append(f'    {node_id}["角色：{mermaid_label(role)}"]')
         lines.append(f"    RG --> {node_id}")
@@ -235,6 +305,7 @@ def information_structure(
         )
 
     for index, endpoint in enumerate(endpoint_values or ["[待确认端口]"], 1):
+        index = (endpoint_ids or {}).get(endpoint, index)
         node_id = f"E{index:02d}"
         lines.append(f'    {node_id}["端口：{mermaid_label(endpoint)}"]')
         lines.append(f"    EG --> {node_id}")
@@ -246,6 +317,7 @@ def information_structure(
         )
 
     for index, module in enumerate(modules or ["[待确认模块]"], 1):
+        index = (module_ids or {}).get(module, index)
         module_id = f"M{index:02d}"
         object_id = f"O{index:02d}"
         page_id = f"PG{index:02d}"
@@ -279,6 +351,7 @@ def project_context(
     modules: list[str],
     endpoints: dict[str, list[str]],
     today: str,
+    module_ids=None, role_ids=None, endpoint_ids=None,
 ) -> dict[str, str]:
     role_rows = "\n".join(
         f"| {role} | [待确认] | [待确认] | [待确认] | {role_endpoints(role, endpoints)} |"
@@ -288,7 +361,7 @@ def project_context(
         role_rows = "| [待确认] | [待确认] | [待确认] | [待确认] | [待确认] |"
 
     module_rows = "\n".join(
-        f"| M{index:02d} | {module} | [待确认] | [待确认] | [待确认] |"
+        f"| M{(module_ids or {}).get(module, index):02d} | {module} | [待确认] | [待确认] | [待确认] |"
         for index, module in enumerate(modules, 1)
     )
     if not module_rows:
@@ -302,6 +375,7 @@ def project_context(
         roles,
         modules,
         endpoints,
+        module_ids, role_ids, endpoint_ids,
     )
     navigation_sections = "\n\n".join(
         (
@@ -321,7 +395,7 @@ def project_context(
         "ENDPOINT_SUMMARY": "、".join(endpoint_values) if endpoint_values else "[待确认]",
         "MODULE_TABLE_ROWS": module_rows,
         "MODULE_BOUNDARY_ROWS": "\n".join(
-            f"| {module}（M{index:02d}） | [待确认] | [待确认] | [待确认] | [待确认] |"
+            f"| {module}（M{(module_ids or {}).get(module, index):02d}） | [待确认] | [待确认] | [待确认] | [待确认] |"
             for index, module in enumerate(modules, 1)
         ) or "| [待确认] | [待确认] | [待确认] | [待确认] | [待确认] |",
         "ROLE_HEADER_CELLS": " | ".join(roles) if roles else "[待确认角色]",
@@ -415,8 +489,11 @@ def scaffold() -> int:
     if args.include_core_pages and any(role not in endpoints for role in roles):
         raise ValueError("创建页面前需要为所列角色确认 --endpoint，不生成端口待确认目录。")
 
+    endpoint_values = unique([endpoint for values in endpoints.values() for endpoint in values])
+    module_indexes, role_indexes, endpoint_indexes = discover_numbers(output_root, modules, roles, endpoint_values)
     today = dt.date.today().isoformat()
-    common = project_context(args.project_name, roles, modules, endpoints, today)
+    common = project_context(args.project_name, roles, modules, endpoints, today,
+                             module_indexes, role_indexes, endpoint_indexes)
     writer = Writer(project_root, output_root, args.dry_run)
 
     project_files = [
@@ -430,7 +507,7 @@ def scaffold() -> int:
         context = dict(common, DOC_ID=f"DOC-P-{index:03d}")
         if template == "项目级产品文档/产品功能架构模板.md":
             rows = "\n".join(
-                f"| M{module_index:02d} | {module} | [待确认] | [待确认] | [待确认] | [待确认] |"
+                f"| M{module_indexes[module]:02d} | {module} | [待确认] | [待确认] | [待确认] | [待确认] |"
                 for module_index, module in enumerate(modules, 1)
             )
             context["MODULE_TABLE_ROWS"] = rows or (
@@ -438,11 +515,8 @@ def scaffold() -> int:
             )
         writer.add(f"01_项目级产品文档/{filename}", template, context)
 
-    role_indexes = {role: index for index, role in enumerate(roles, 1)}
-    endpoint_values = unique(
-        [endpoint for values in endpoints.values() for endpoint in values]
-    )
-    for endpoint_number, endpoint in enumerate(endpoint_values if args.scope == "project" else [], 1):
+    for endpoint in (endpoint_values if args.scope == "project" else []):
+        endpoint_number = endpoint_indexes[endpoint]
         endpoint_safe = safe_segment(endpoint, "端口")
         endpoint_dir = f"02_端口产品视图/E{endpoint_number:02d}_{endpoint_safe}"
         roles_for_endpoint = endpoint_roles(endpoint, roles, endpoints)
@@ -462,7 +536,8 @@ def scaffold() -> int:
             dict(endpoint_context, DOC_ID=f"DOC-E{endpoint_number:02d}-002"),
         )
 
-    for module_number, module in enumerate(modules, 1):
+    for module in modules:
+        module_number = module_indexes[module]
         module_safe = safe_segment(module, "模块")
         module_dir = f"03_业务模块/M{module_number:02d}_{module_safe}"
         module_context = dict(common, MODULE_NAME=module)
@@ -491,7 +566,10 @@ def scaffold() -> int:
                      ACCEPTANCE_NAME=module),
             )
             if args.include_core_pages:
-                for endpoint_number, endpoint in enumerate(endpoint_values, 1):
+                local_numbers = local_endpoint_numbers(output_root / module_dir / "02_页面PRD",
+                                                       endpoint_values, endpoint_indexes, output_root)
+                for endpoint in endpoint_values:
+                    endpoint_number = local_numbers[endpoint]
                     applicable = endpoint_roles(endpoint, selected_roles, endpoints)
                     if not applicable:
                         continue
@@ -539,7 +617,10 @@ def scaffold() -> int:
 
             if args.include_core_pages:
                 selected_endpoints = endpoints[role]
-                for endpoint_number, endpoint in enumerate(selected_endpoints, 1):
+                local_numbers = local_endpoint_numbers(output_root / identity_dir / "03_页面PRD",
+                                                       selected_endpoints, endpoint_indexes, output_root)
+                for endpoint in selected_endpoints:
+                    endpoint_number = local_numbers[endpoint]
                     endpoint_safe = safe_segment(endpoint, "端口")
                     page_dir = (
                         f"{identity_dir}/03_页面PRD/"
